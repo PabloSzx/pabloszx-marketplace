@@ -1,0 +1,21 @@
+{
+  "name": "pabloszx-marketplace",
+  "metadata": {
+    "description": "PabloSzx's Claude Code plugins",
+    "version": "1.0.0"
+  },
+  "owner": {
+    "name": "PabloSzx"
+  },
+  "plugins": [
+    {
+      "name": "refactor-verifier",
+      "description": "Deterministically verify that code refactors are purely structural with no unintended logic changes",
+      "source": {
+        "source": "url",
+        "url": "file://./plugins/refactor-verifier"
+      },
+      "category": "code-analysis"
+    }
+  ]
+}

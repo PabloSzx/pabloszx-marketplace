@@ -1,0 +1,9 @@
+{
+  "name": "refactor-verifier",
+  "version": "1.0.0",
+  "description": "Deterministically verify that code refactors are purely structural with no unintended logic changes",
+  "author": {
+    "name": "Claude Code"
+  },
+  "keywords": ["refactor", "verification", "python", "typescript", "code-analysis", "ast"]
+}
