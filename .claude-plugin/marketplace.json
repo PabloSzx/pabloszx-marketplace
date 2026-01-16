@@ -13,7 +13,7 @@
       "description": "Deterministically verify that code refactors are purely structural with no unintended logic changes",
       "source": {
         "source": "url",
-        "url": "file://./plugins/refactor-verifier"
+        "url": "https://github.com/PabloSzx/pabloszx-marketplace.git?path=plugins/refactor-verifier"
       },
       "category": "code-analysis"
     }
