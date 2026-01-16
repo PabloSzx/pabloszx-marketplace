@@ -1,9 +1,7 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "pabloszx-marketplace",
-  "metadata": {
-    "description": "PabloSzx's Claude Code plugins",
-    "version": "1.0.0"
-  },
+  "description": "PabloSzx's Claude Code plugins",
   "owner": {
     "name": "PabloSzx"
   },
@@ -11,10 +9,7 @@
     {
       "name": "refactor-verifier",
       "description": "Deterministically verify that code refactors are purely structural with no unintended logic changes",
-      "source": {
-        "source": "url",
-        "url": "https://github.com/PabloSzx/pabloszx-marketplace.git?path=plugins/refactor-verifier"
-      },
+      "source": "./plugins/refactor-verifier",
       "category": "code-analysis"
     }
   ]
