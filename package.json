@@ -1,0 +1,12 @@
+{
+  "name": "pabloszx-marketplace",
+  "private": true,
+  "scripts": {
+    "ts": "bun run --bun tsc --noEmit",
+    "ts:watch": "bun run --bun tsc --noEmit --watch"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

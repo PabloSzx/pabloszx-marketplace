@@ -16,6 +16,20 @@
  */
 
 import { $ } from "bun";
+import ts from "typescript";
+
+// TypeScript definition interfaces
+interface TSDefinition {
+  body_hash: string;
+  body: string;
+  lineno: number;
+  kind: "function" | "class" | "interface" | "type" | "const" | "enum";
+}
+
+interface TSDefinitions {
+  items: Record<string, TSDefinition>;
+  error?: string;
+}
 
 // Python script to extract definitions from Python source
 const PYTHON_EXTRACTOR = `
@@ -187,6 +201,144 @@ async function getChangedPythonFiles(baseBranch: string): Promise<string[]> {
   return diff.trim().split("\n").filter(f => f.length > 0);
 }
 
+async function getChangedTSFiles(baseBranch: string): Promise<string[]> {
+  const diff = await $`git diff ${baseBranch} --name-only -- "*.ts" "*.tsx"`.text().catch(() => "");
+  return diff.trim().split("\n").filter(f => f.length > 0 && !f.endsWith(".d.ts"));
+}
+
+function normalizeTSCode(code: string): string {
+  return code
+    .replace(/\/\/.*$/gm, "")           // Remove single-line comments
+    .replace(/\/\*[\s\S]*?\*\//g, "")   // Remove multi-line comments
+    .replace(/\s+/g, " ")               // Normalize whitespace
+    .trim();
+}
+
+function extractTSDefinitions(sourceCode: string, filename: string): TSDefinitions {
+  const defs: TSDefinitions = { items: {} };
+
+  try {
+    const sourceFile = ts.createSourceFile(
+      filename,
+      sourceCode,
+      ts.ScriptTarget.Latest,
+      true,
+      filename.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+    );
+
+    function visit(node: ts.Node) {
+      const startLine = sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+
+      // Function declarations: function foo() {}
+      if (ts.isFunctionDeclaration(node) && node.name) {
+        const name = node.name.text;
+        const body = sourceCode.slice(node.pos, node.end);
+        const hash = Bun.hash(normalizeTSCode(body)).toString(16);
+        defs.items[`fn:${name}`] = { body_hash: hash, body, lineno: startLine, kind: "function" };
+      }
+
+      // Variable declarations with arrow/function: const foo = () => {} or const foo = memo(...)
+      if (ts.isVariableStatement(node)) {
+        for (const decl of node.declarationList.declarations) {
+          if (ts.isIdentifier(decl.name) && decl.initializer) {
+            const name = decl.name.text;
+            const init = decl.initializer;
+
+            // Arrow function, function expression, or call expression (like memo())
+            if (ts.isArrowFunction(init) || ts.isFunctionExpression(init) || ts.isCallExpression(init)) {
+              const body = sourceCode.slice(node.pos, node.end);
+              const hash = Bun.hash(normalizeTSCode(body)).toString(16);
+              defs.items[`const:${name}`] = { body_hash: hash, body, lineno: startLine, kind: "const" };
+            }
+          }
+        }
+      }
+
+      // Class declarations
+      if (ts.isClassDeclaration(node) && node.name) {
+        const name = node.name.text;
+        const body = sourceCode.slice(node.pos, node.end);
+        const hash = Bun.hash(normalizeTSCode(body)).toString(16);
+        defs.items[`class:${name}`] = { body_hash: hash, body, lineno: startLine, kind: "class" };
+      }
+
+      // Interface declarations
+      if (ts.isInterfaceDeclaration(node)) {
+        const name = node.name.text;
+        const body = sourceCode.slice(node.pos, node.end);
+        const hash = Bun.hash(normalizeTSCode(body)).toString(16);
+        defs.items[`interface:${name}`] = { body_hash: hash, body, lineno: startLine, kind: "interface" };
+      }
+
+      // Type alias declarations
+      if (ts.isTypeAliasDeclaration(node)) {
+        const name = node.name.text;
+        const body = sourceCode.slice(node.pos, node.end);
+        const hash = Bun.hash(normalizeTSCode(body)).toString(16);
+        defs.items[`type:${name}`] = { body_hash: hash, body, lineno: startLine, kind: "type" };
+      }
+
+      // Enum declarations
+      if (ts.isEnumDeclaration(node)) {
+        const name = node.name.text;
+        const body = sourceCode.slice(node.pos, node.end);
+        const hash = Bun.hash(normalizeTSCode(body)).toString(16);
+        defs.items[`enum:${name}`] = { body_hash: hash, body, lineno: startLine, kind: "enum" };
+      }
+
+      ts.forEachChild(node, visit);
+    }
+
+    visit(sourceFile);
+  } catch (e) {
+    defs.error = `Parse error in ${filename}: ${e}`;
+  }
+
+  return defs;
+}
+
+function mergeTSDefinitions(allDefs: TSDefinitions[]): TSDefinitions {
+  const merged: TSDefinitions = { items: {} };
+  for (const defs of allDefs) {
+    Object.assign(merged.items, defs.items);
+  }
+  return merged;
+}
+
+function compareTSDefinitions(oldDefs: TSDefinitions, newDefs: TSDefinitions): ComparisonResult {
+  const result: ComparisonResult = { identical: true, added: [], removed: [], modified: [], matching: [] };
+
+  const oldNames = new Set(Object.keys(oldDefs.items));
+  const newNames = new Set(Object.keys(newDefs.items));
+
+  for (const name of oldNames) {
+    if (!newNames.has(name)) {
+      result.removed.push(name);
+      result.identical = false;
+    } else if (oldDefs.items[name].body_hash !== newDefs.items[name].body_hash) {
+      result.modified.push({
+        name,
+        type: oldDefs.items[name].kind,
+        reason: "body changed",
+        oldHash: oldDefs.items[name].body_hash,
+        newHash: newDefs.items[name].body_hash
+      });
+      result.identical = false;
+    } else {
+      result.matching.push(name);
+    }
+  }
+
+  for (const name of newNames) {
+    if (!oldNames.has(name)) {
+      result.added.push(name);
+      result.identical = false;
+    }
+  }
+
+  return result;
+}
+
 async function getOldFileContent(baseBranch: string, filePath: string): Promise<string> {
   return await $`git show ${baseBranch}:${filePath}`.text().catch(() => "");
 }
@@ -278,69 +430,10 @@ function compareDefinitions(oldDefs: Definitions, newDefs: Definitions): Compari
   return result;
 }
 
-async function main() {
-  console.log("=".repeat(70));
-  console.log("REFACTOR VERIFICATION SCRIPT");
-  console.log("=".repeat(70));
-  console.log();
-
-  // Step 1: Detect base branch
-  console.log("🔍 Detecting base branch...");
-  const baseBranch = await getBaseBranch();
-  console.log(`   Base branch: ${baseBranch}`);
-
-  // Step 2: Get changed Python files
-  console.log("\n📄 Finding changed Python files...");
-  const changedFiles = await getChangedPythonFiles(baseBranch);
-
-  if (changedFiles.length === 0) {
-    console.log("   No Python files changed.");
-    console.log("\n✅ Nothing to verify.");
-    process.exit(0);
-  }
-
-  console.log(`   Found ${changedFiles.length} changed files:`);
-  for (const file of changedFiles.slice(0, 10)) {
-    console.log(`   - ${file}`);
-  }
-  if (changedFiles.length > 10) {
-    console.log(`   ... and ${changedFiles.length - 10} more`);
-  }
-
-  // Step 3: Extract definitions from old files
-  console.log("\n🔍 Extracting definitions from old code...");
-  const oldDefsArray: Definitions[] = [];
-  for (const file of changedFiles) {
-    const content = await getOldFileContent(baseBranch, file);
-    if (content) {
-      const defs = await extractPythonDefinitions(content, file);
-      if (!defs.error) oldDefsArray.push(defs);
-    }
-  }
-  const oldDefs = mergeDefinitions(oldDefsArray);
-  console.log(`   Functions: ${Object.keys(oldDefs.functions).length}`);
-  console.log(`   Classes: ${Object.keys(oldDefs.classes).length}`);
-
-  // Step 4: Extract definitions from new files
-  console.log("\n🔍 Extracting definitions from new code...");
-  const newDefsArray: Definitions[] = [];
-  for (const file of changedFiles) {
-    const content = await getNewFileContent(file);
-    if (content) {
-      const defs = await extractPythonDefinitions(content, file);
-      if (!defs.error) newDefsArray.push(defs);
-    }
-  }
-  const newDefs = mergeDefinitions(newDefsArray);
-  console.log(`   Functions: ${Object.keys(newDefs.functions).length}`);
-  console.log(`   Classes: ${Object.keys(newDefs.classes).length}`);
-
-  // Step 5: Compare
+function printComparisonResults(comparison: ComparisonResult, label: string) {
   console.log("\n" + "=".repeat(70));
-  console.log("COMPARISON RESULTS");
+  console.log(`${label} COMPARISON RESULTS`);
   console.log("=".repeat(70));
-
-  const comparison = compareDefinitions(oldDefs, newDefs);
 
   if (comparison.removed.length > 0) {
     console.log("\n❌ REMOVED (exist in old, missing in new):");
@@ -366,22 +459,147 @@ async function main() {
   }
 
   console.log(`\n✅ MATCHING: ${comparison.matching.length} items`);
+}
+
+async function main() {
+  console.log("=".repeat(70));
+  console.log("REFACTOR VERIFICATION SCRIPT");
+  console.log("=".repeat(70));
+  console.log();
+
+  // Step 1: Detect base branch
+  console.log("🔍 Detecting base branch...");
+  const baseBranch = await getBaseBranch();
+  console.log(`   Base branch: ${baseBranch}`);
+
+  // Step 2: Get changed files
+  const pythonFiles = await getChangedPythonFiles(baseBranch);
+  const tsFiles = await getChangedTSFiles(baseBranch);
+
+  if (pythonFiles.length === 0 && tsFiles.length === 0) {
+    console.log("\n📄 No Python or TypeScript files changed.");
+    console.log("\n✅ Nothing to verify.");
+    process.exit(0);
+  }
+
+  let pythonComparison: ComparisonResult | null = null;
+  let tsComparison: ComparisonResult | null = null;
+
+  // === PYTHON FILES ===
+  if (pythonFiles.length > 0) {
+    console.log(`\n📄 Found ${pythonFiles.length} Python files:`);
+    for (const file of pythonFiles.slice(0, 10)) {
+      console.log(`   - ${file}`);
+    }
+    if (pythonFiles.length > 10) {
+      console.log(`   ... and ${pythonFiles.length - 10} more`);
+    }
+
+    // Extract definitions from old files
+    console.log("\n🔍 Extracting Python definitions from old code...");
+    const oldDefsArray: Definitions[] = [];
+    for (const file of pythonFiles) {
+      const content = await getOldFileContent(baseBranch, file);
+      if (content) {
+        const defs = await extractPythonDefinitions(content, file);
+        if (!defs.error) oldDefsArray.push(defs);
+      }
+    }
+    const oldDefs = mergeDefinitions(oldDefsArray);
+    console.log(`   Functions: ${Object.keys(oldDefs.functions).length}`);
+    console.log(`   Classes: ${Object.keys(oldDefs.classes).length}`);
+
+    // Extract definitions from new files
+    console.log("\n🔍 Extracting Python definitions from new code...");
+    const newDefsArray: Definitions[] = [];
+    for (const file of pythonFiles) {
+      const content = await getNewFileContent(file);
+      if (content) {
+        const defs = await extractPythonDefinitions(content, file);
+        if (!defs.error) newDefsArray.push(defs);
+      }
+    }
+    const newDefs = mergeDefinitions(newDefsArray);
+    console.log(`   Functions: ${Object.keys(newDefs.functions).length}`);
+    console.log(`   Classes: ${Object.keys(newDefs.classes).length}`);
+
+    pythonComparison = compareDefinitions(oldDefs, newDefs);
+    printComparisonResults(pythonComparison, "PYTHON");
+  }
+
+  // === TYPESCRIPT FILES ===
+  if (tsFiles.length > 0) {
+    console.log(`\n📄 Found ${tsFiles.length} TypeScript files:`);
+    for (const file of tsFiles.slice(0, 10)) {
+      console.log(`   - ${file}`);
+    }
+    if (tsFiles.length > 10) {
+      console.log(`   ... and ${tsFiles.length - 10} more`);
+    }
+
+    // Extract definitions from old files
+    console.log("\n🔍 Extracting TypeScript definitions from old code...");
+    const oldTSDefs: TSDefinitions[] = [];
+    for (const file of tsFiles) {
+      const content = await getOldFileContent(baseBranch, file);
+      if (content) {
+        const defs = extractTSDefinitions(content, file);
+        if (!defs.error) oldTSDefs.push(defs);
+      }
+    }
+    const mergedOldTS = mergeTSDefinitions(oldTSDefs);
+    console.log(`   Definitions: ${Object.keys(mergedOldTS.items).length}`);
+
+    // Extract definitions from new files
+    console.log("\n🔍 Extracting TypeScript definitions from new code...");
+    const newTSDefs: TSDefinitions[] = [];
+    for (const file of tsFiles) {
+      const content = await getNewFileContent(file);
+      if (content) {
+        const defs = extractTSDefinitions(content, file);
+        if (!defs.error) newTSDefs.push(defs);
+      }
+    }
+    const mergedNewTS = mergeTSDefinitions(newTSDefs);
+    console.log(`   Definitions: ${Object.keys(mergedNewTS.items).length}`);
+
+    tsComparison = compareTSDefinitions(mergedOldTS, mergedNewTS);
+    printComparisonResults(tsComparison, "TYPESCRIPT");
+  }
 
   // Final verdict
+  const pythonIdentical = pythonComparison?.identical ?? true;
+  const tsIdentical = tsComparison?.identical ?? true;
+  const allIdentical = pythonIdentical && tsIdentical;
+
   console.log("\n" + "=".repeat(70));
-  if (comparison.identical) {
-    console.log("✅ VERIFICATION PASSED: Refactor is 100% structural");
-    console.log("   All function and class bodies are identical.");
-    console.log("=".repeat(70));
+  console.log("FINAL VERDICT");
+  console.log("=".repeat(70));
+
+  if (allIdentical) {
+    console.log("\n✅ VERIFICATION PASSED: Refactor is 100% structural");
+    console.log("   All function, class, and type bodies are identical.");
     process.exit(0);
   } else {
-    console.log("❌ VERIFICATION FAILED: Changes detected beyond refactoring");
-    console.log("=".repeat(70));
+    console.log("\n❌ VERIFICATION FAILED: Changes detected beyond refactoring");
     console.log("\nSummary:");
-    console.log(`  - Removed: ${comparison.removed.length}`);
-    console.log(`  - Added: ${comparison.added.length}`);
-    console.log(`  - Modified: ${comparison.modified.length}`);
-    console.log(`  - Matching: ${comparison.matching.length}`);
+
+    if (pythonComparison && !pythonComparison.identical) {
+      console.log("\n  Python:");
+      console.log(`    - Removed: ${pythonComparison.removed.length}`);
+      console.log(`    - Added: ${pythonComparison.added.length}`);
+      console.log(`    - Modified: ${pythonComparison.modified.length}`);
+      console.log(`    - Matching: ${pythonComparison.matching.length}`);
+    }
+
+    if (tsComparison && !tsComparison.identical) {
+      console.log("\n  TypeScript:");
+      console.log(`    - Removed: ${tsComparison.removed.length}`);
+      console.log(`    - Added: ${tsComparison.added.length}`);
+      console.log(`    - Modified: ${tsComparison.modified.length}`);
+      console.log(`    - Matching: ${tsComparison.matching.length}`);
+    }
+
     process.exit(1);
   }
 }

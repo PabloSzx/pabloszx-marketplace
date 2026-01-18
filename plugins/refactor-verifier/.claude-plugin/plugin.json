@@ -1,6 +1,6 @@
 {
   "name": "refactor-verifier",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Deterministically verify that code refactors are purely structural with no unintended logic changes",
   "author": {
     "name": "Claude Code"
